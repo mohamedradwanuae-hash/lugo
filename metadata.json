@@ -1,0 +1,6 @@
+{
+  "name": "Lugo",
+  "description": "Lugo: High-fidelity premium social earning app featuring verified-female video calls and secure host withdrawal management.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
