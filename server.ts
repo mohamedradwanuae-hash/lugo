@@ -39,6 +39,7 @@ const supabaseAnonKey = process.env.SUPABASE_ANON_KEY || "";
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 
 let supabase: any = null;
+let supabaseAnon: any = null;
 const isSupabaseConfigured =
   supabaseUrl &&
   !supabaseUrl.includes("your-project") &&
@@ -48,6 +49,11 @@ const isSupabaseConfigured =
 if (isSupabaseConfigured) {
   try {
     supabase = createClient(supabaseUrl, supabaseServiceKey, {
+      auth: {
+        persistSession: false,
+      },
+    });
+    supabaseAnon = createClient(supabaseUrl, supabaseAnonKey, {
       auth: {
         persistSession: false,
       },
@@ -179,6 +185,78 @@ function createSession(user: any) {
   return token;
 }
 
+async function signInWithSupabase(identifier: string, password: string) {
+  if (!supabaseAnon) {
+    return null;
+  }
+
+  try {
+    const { data, error } = await supabaseAnon.auth.signInWithPassword({
+      email: identifier,
+      password,
+    });
+
+    if (error || !data.session || !data.user) {
+      return null;
+    }
+
+    const metadata = data.user.user_metadata || {};
+    return {
+      id: data.user.id,
+      username: metadata.username || data.user.email || "User",
+      email: data.user.email || identifier,
+      gender: metadata.gender || "male",
+      role: metadata.role || (metadata.gender === "female" ? "host" : metadata.gender === "admin" ? "admin" : "caller"),
+      isSuperuser: Boolean(metadata.is_admin),
+      balance: metadata.gender === "male" ? 1000 : 0,
+      earnings_balance: 0,
+      msg_price_coins: 10,
+      video_price_coins: 350,
+      token: data.session.access_token,
+    };
+  } catch (err) {
+    console.error("Supabase sign-in failed:", err);
+    return null;
+  }
+}
+
+async function createSupabaseAuthUser({ username, email, password, gender }: { username: string; email: string; password: string; gender: string }) {
+  if (!supabase) {
+    return null;
+  }
+
+  try {
+    const userRole = gender === "female" ? "host" : gender === "admin" ? "admin" : "caller";
+    const { data, error } = await supabase.auth.admin.createUser({
+      email,
+      password,
+      email_confirm: true,
+      user_metadata: {
+        username,
+        gender,
+        role: userRole,
+        is_admin: gender === "admin",
+      },
+    });
+
+    if (error || !data.user) {
+      throw error || new Error("Unable to create Supabase user.");
+    }
+
+    return {
+      id: data.user.id,
+      username,
+      email,
+      gender,
+      role: userRole,
+      isSuperuser: gender === "admin",
+    };
+  } catch (err) {
+    console.error("Supabase auth user creation failed:", err);
+    return null;
+  }
+}
+
 // ============================================================================
 // AUTH ROUTES
 // ============================================================================
@@ -226,27 +304,13 @@ app.post("/api/auth/signup", async (req, res) => {
     });
   }
 
-  if (supabase) {
-    try {
-      const { data: authUserData, error: authUserError } = await supabase.auth.admin.createUser({
-        email,
-        password,
-        email_confirm: true,
-        user_metadata: {
-          username,
-          gender,
-          role: userRole,
-          is_admin: gender === "admin",
-        },
-      });
-
-      if (authUserError) throw authUserError;
-
-      const authUserId = authUserData.user?.id;
-      if (authUserId) {
-        newUser.id = authUserId;
+  const supabaseUser = await createSupabaseAuthUser({ username, email, password, gender });
+  if (supabaseUser) {
+    newUser.id = supabaseUser.id;
+    if (supabase) {
+      try {
         const { error: profileError } = await supabase.from("profiles").insert({
-          id: authUserId,
+          id: supabaseUser.id,
           username,
           avatar_url: `https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=300`,
           gender,
@@ -259,9 +323,9 @@ app.post("/api/auth/signup", async (req, res) => {
         });
 
         if (profileError) throw profileError;
+      } catch (err: any) {
+        console.error("Supabase signup profile insert failed:", err);
       }
-    } catch (err: any) {
-      console.error("Supabase signup profile insert failed:", err);
     }
   }
 
@@ -269,11 +333,17 @@ app.post("/api/auth/signup", async (req, res) => {
   return res.json({ success: true, user: sanitizeUser(newUser), token });
 });
 
-app.post("/api/auth/signin", (req, res) => {
+app.post("/api/auth/signin", async (req, res) => {
   const { identifier, password } = req.body;
 
   if (!identifier || !password) {
     return res.status(400).json({ success: false, error: "Email or username and password are required." });
+  }
+
+  const supabaseUser = await signInWithSupabase(identifier, password);
+  if (supabaseUser) {
+    const token = createSession(supabaseUser);
+    return res.json({ success: true, user: sanitizeUser(supabaseUser), token });
   }
 
   const user = getUserByIdentifier(identifier);
