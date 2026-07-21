@@ -150,16 +150,168 @@ const localRatings = [
 ];
 
 const localUsers = [
-  { id: "caller-uuid-1", username: "Alex_99", email: "alex@gmail.com", role: "caller", isSuperuser: false },
-  { id: "host-uuid-1", username: "Sophia Rodriguez", email: "sophia@gmail.com", role: "host", isSuperuser: false },
-  { id: "host-uuid-2", username: "Emma Watson", email: "emma@gmail.com", role: "host", isSuperuser: false },
-  { id: "host-uuid-3", username: "Isabella Garcia", email: "isabella@gmail.com", role: "host", isSuperuser: false },
-  { id: "admin-uuid-1", username: "SuperAdmin", email: "admin@lugo.com", role: "admin", isSuperuser: true }
+  { id: "caller-uuid-1", username: "Alex_99", email: "alex@gmail.com", gender: "male", role: "caller", isSuperuser: false, password: "alex123", balance: 1000, earnings_balance: 0, msg_price_coins: 10, video_price_coins: 350 },
+  { id: "host-uuid-1", username: "Sophia Rodriguez", email: "sophia@gmail.com", gender: "female", role: "host", isSuperuser: false, password: "sophia123", balance: 0, earnings_balance: 24.5, msg_price_coins: 10, video_price_coins: 350 },
+  { id: "host-uuid-2", username: "Emma Watson", email: "emma@gmail.com", gender: "female", role: "host", isSuperuser: false, password: "emma123", balance: 0, earnings_balance: 42.2, msg_price_coins: 12, video_price_coins: 400 },
+  { id: "host-uuid-3", username: "Isabella Garcia", email: "isabella@gmail.com", gender: "female", role: "host", isSuperuser: false, password: "isabella123", balance: 0, earnings_balance: 88.0, msg_price_coins: 15, video_price_coins: 500 },
+  { id: "admin-uuid-1", username: "SuperAdmin", email: "admin@lugo.com", gender: "admin", role: "admin", isSuperuser: true, password: "admin123", balance: 0, earnings_balance: 0, msg_price_coins: 10, video_price_coins: 350 }
 ];
+
+const authSessions = new Map<string, string>();
+
+function sanitizeUser(user: any) {
+  if (!user) return null;
+  const { password, ...rest } = user;
+  return rest;
+}
+
+function getUserByIdentifier(identifier: string) {
+  return localUsers.find((user) => user.email === identifier || user.username === identifier);
+}
+
+function getUserById(id: string) {
+  return localUsers.find((user) => user.id === id);
+}
+
+function createSession(user: any) {
+  const token = crypto.randomUUID();
+  authSessions.set(token, user.id);
+  return token;
+}
+
+// ============================================================================
+// AUTH ROUTES
+// ============================================================================
+
+app.post("/api/auth/signup", (req, res) => {
+  const { username, email, password, gender = "male" } = req.body;
+
+  if (!username || !email || !password) {
+    return res.status(400).json({ success: false, error: "Username, email, and password are required." });
+  }
+
+  const existingUser = getUserByIdentifier(email || username);
+  if (existingUser) {
+    return res.status(409).json({ success: false, error: "An account with that email or username already exists." });
+  }
+
+  const newUser = {
+    id: `user-uuid-${Date.now()}`,
+    username,
+    email,
+    gender,
+    role: gender === "female" ? "host" : gender === "admin" ? "admin" : "caller",
+    isSuperuser: gender === "admin",
+    password,
+    balance: gender === "male" ? 1000 : 0,
+    earnings_balance: 0,
+    msg_price_coins: 10,
+    video_price_coins: 350,
+  };
+
+  localUsers.push(newUser);
+
+  if (gender === "female") {
+    localHosts.unshift({
+      id: newUser.id,
+      username,
+      avatarUrl: `https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=300`,
+      msgPrice: 10,
+      voicePrice: 200,
+      videoPrice: 500,
+      earnings: 0.00,
+      isVerified: true,
+      whatsapp: "+15550000",
+    });
+  }
+
+  const token = createSession(newUser);
+  return res.json({ success: true, user: sanitizeUser(newUser), token });
+});
+
+app.post("/api/auth/signin", (req, res) => {
+  const { identifier, password } = req.body;
+
+  if (!identifier || !password) {
+    return res.status(400).json({ success: false, error: "Email or username and password are required." });
+  }
+
+  const user = getUserByIdentifier(identifier);
+  if (!user || user.password !== password) {
+    return res.status(401).json({ success: false, error: "Invalid credentials." });
+  }
+
+  const token = createSession(user);
+  return res.json({ success: true, user: sanitizeUser(user), token });
+});
+
+app.get("/api/auth/me", (req, res) => {
+  const authorization = req.headers.authorization || "";
+  const token = authorization.replace("Bearer ", "");
+  const userId = authSessions.get(token);
+
+  if (!userId) {
+    return res.status(401).json({ success: false, error: "Not authenticated." });
+  }
+
+  const user = localUsers.find((entry) => entry.id === userId);
+  return res.json({ success: true, user: sanitizeUser(user) });
+});
 
 // ============================================================================
 // API ROUTES
 // ============================================================================
+
+app.post("/api/topup", (req, res) => {
+  const { userId, amount = 1000 } = req.body;
+  const user = getUserById(userId);
+  if (!user) {
+    return res.status(404).json({ success: false, error: "User not found" });
+  }
+  user.balance = (user.balance || 0) + Number(amount);
+  return res.json({ success: true, balance: user.balance });
+});
+
+app.post("/api/chat/send", (req, res) => {
+  const { senderId, recipientId, text } = req.body;
+  const sender = getUserById(senderId);
+  const recipient = getUserById(recipientId);
+  if (!sender || !recipient) {
+    return res.status(404).json({ success: false, error: "Sender or recipient not found" });
+  }
+  if (sender.gender !== "male") {
+    return res.status(400).json({ success: false, error: "Only male accounts can send paid messages." });
+  }
+  const price = recipient.msg_price_coins || 10;
+  if ((sender.balance || 0) < price) {
+    return res.status(400).json({ success: false, error: "Insufficient balance." });
+  }
+  sender.balance = (sender.balance || 0) - price;
+  recipient.earnings_balance = Number((Number(recipient.earnings_balance || 0) + price / 1000 * 0.5).toFixed(2));
+  localMessages.push({ id: `msg-${Date.now()}`, senderId, senderName: sender.username, recipientId, recipientName: recipient.username, text, createdAt: new Date().toISOString() });
+  return res.json({ success: true, remainingBalance: sender.balance });
+});
+
+app.post("/api/video/credit-minute", (req, res) => {
+  const { femaleId, rate = 0.1 } = req.body;
+  const female = getUserById(femaleId);
+  if (!female) {
+    return res.status(404).json({ success: false, error: "Female profile not found" });
+  }
+  female.earnings_balance = Number((Number(female.earnings_balance || 0) + Number(rate)).toFixed(2));
+  return res.json({ success: true, earningsBalance: female.earnings_balance });
+});
+
+app.post("/api/female/pricing", (req, res) => {
+  const { femaleId, msgPrice, videoPrice } = req.body;
+  const female = getUserById(femaleId);
+  if (!female) {
+    return res.status(404).json({ success: false, error: "Female profile not found" });
+  }
+  female.msg_price_coins = Number(msgPrice || female.msg_price_coins || 10);
+  female.video_price_coins = Number(videoPrice || female.video_price_coins || 350);
+  return res.json({ success: true, msgPrice: female.msg_price_coins, videoPrice: female.video_price_coins });
+});
 
 // 1. Camera Gender Verification via Gemini Vision API
 app.post("/api/verify-gender", async (req, res) => {
@@ -389,66 +541,40 @@ app.get("/api/withdrawals", async (req, res) => {
 
 // 5. Request a New Withdrawal (Includes other payout methods, comments, and WhatsApp)
 app.post("/api/withdrawals", async (req, res) => {
-  const { hostId, hostName, amount, payoutMethod, bankName, iban, comments, whatsapp, isVerifiedFemale } = req.body;
+  const { femaleId, amount, bankName, iban } = req.body;
 
-  if (!amount || !payoutMethod || !whatsapp) {
-    return res.status(400).json({
-      success: false,
-      error: "Amount, Payout Method, and WhatsApp Contact Number are required.",
-    });
+  if (!femaleId || !amount || !bankName || !iban) {
+    return res.status(400).json({ success: false, error: "Female ID, amount, bank name, and IBAN are required." });
   }
 
-  // Enforce rule: Not all hosts will get paid, ONLY verified biological female users.
-  const matchedHost = localHosts.find((h) => h.id === hostId || h.username === hostName);
-  const isFemale = matchedHost ? (matchedHost.isVerified || (matchedHost as any).gender === "female") : isVerifiedFemale;
-
-  if (!isFemale) {
-    return res.status(400).json({
-      success: false,
-      error: "Withdrawal rejected: Only verified biological female hosts are eligible for payouts.",
-    });
+  const female = getUserById(femaleId);
+  if (!female || female.gender !== "female") {
+    return res.status(400).json({ success: false, error: "Only female users can request payouts." });
   }
 
-  if (supabase) {
-    try {
-      // In a real Supabase DB, we can insert into withdrawal_requests
-      // Since withdrawal_requests schema in supabase_schema.sql only has host_id, amount, bank_name, iban, status,
-      // we can save other payout/comments inside the bank_name or iban column or extend schema.
-      // To preserve schema without breaking changes, we serialize the comments/method inside bank_name or ibis:
-      const serializedBank = payoutMethod === "Other" ? `Other: ${comments}` : payoutMethod;
-      const serializedIban = `IBAN: ${iban} | WhatsApp: ${whatsapp}`;
-
-      const { data, error } = await supabase.from("withdrawal_requests").insert({
-        host_id: hostId || "00000000-0000-0000-0000-000000000000",
-        amount,
-        bank_name: serializedBank,
-        iban: serializedIban,
-        status: "pending",
-      });
-
-      if (error) throw error;
-      return res.json({ success: true, message: "Withdrawal submitted to Supabase!" });
-    } catch (err: any) {
-      console.error("Supabase insert error, falling back to emulation:", err);
-    }
+  const parsedAmount = Number(amount);
+  if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
+    return res.status(400).json({ success: false, error: "Amount must be greater than zero." });
   }
 
-  // Emulation fallback
+  if ((female.earnings_balance || 0) < parsedAmount) {
+    return res.status(400).json({ success: false, error: "Insufficient earnings balance." });
+  }
+
+  female.earnings_balance = Number((Number(female.earnings_balance || 0) - parsedAmount).toFixed(2));
+
   const newWithdrawal = {
     id: `w-req-${Date.now()}`,
-    hostId: hostId || "current-user-host",
-    hostName: hostName || "Sophia Rodriguez",
-    amount: parseFloat(amount),
-    payoutMethod,
-    bankName: bankName || "N/A",
-    iban: iban || "N/A",
-    comments: comments || "",
-    whatsapp,
+    femaleId,
+    femaleName: female.username,
+    amount: parsedAmount,
+    bankName,
+    iban,
     status: "pending",
   };
 
   localWithdrawals.push(newWithdrawal);
-  return res.json({ success: true, withdrawal: newWithdrawal });
+  return res.json({ success: true, withdrawal: newWithdrawal, remainingBalance: female.earnings_balance });
 });
 
 // 6. Approve Withdrawal (Admin Only)
