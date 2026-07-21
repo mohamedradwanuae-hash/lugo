@@ -183,7 +183,7 @@ function createSession(user: any) {
 // AUTH ROUTES
 // ============================================================================
 
-app.post("/api/auth/signup", (req, res) => {
+app.post("/api/auth/signup", async (req, res) => {
   const { username, email, password, gender = "male" } = req.body;
 
   if (!username || !email || !password) {
@@ -195,12 +195,13 @@ app.post("/api/auth/signup", (req, res) => {
     return res.status(409).json({ success: false, error: "An account with that email or username already exists." });
   }
 
+  const userRole = gender === "female" ? "host" : gender === "admin" ? "admin" : "caller";
   const newUser = {
     id: `user-uuid-${Date.now()}`,
     username,
     email,
     gender,
-    role: gender === "female" ? "host" : gender === "admin" ? "admin" : "caller",
+    role: userRole,
     isSuperuser: gender === "admin",
     password,
     balance: gender === "male" ? 1000 : 0,
@@ -223,6 +224,45 @@ app.post("/api/auth/signup", (req, res) => {
       isVerified: true,
       whatsapp: "+15550000",
     });
+  }
+
+  if (supabase) {
+    try {
+      const { data: authUserData, error: authUserError } = await supabase.auth.admin.createUser({
+        email,
+        password,
+        email_confirm: true,
+        user_metadata: {
+          username,
+          gender,
+          role: userRole,
+          is_admin: gender === "admin",
+        },
+      });
+
+      if (authUserError) throw authUserError;
+
+      const authUserId = authUserData.user?.id;
+      if (authUserId) {
+        newUser.id = authUserId;
+        const { error: profileError } = await supabase.from("profiles").insert({
+          id: authUserId,
+          username,
+          avatar_url: `https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=300`,
+          gender,
+          is_admin: gender === "admin",
+          balance: newUser.balance,
+          earnings_balance: 0,
+          msg_price_coins: 10,
+          video_price_coins: 350,
+          created_at: new Date().toISOString(),
+        });
+
+        if (profileError) throw profileError;
+      }
+    } catch (err: any) {
+      console.error("Supabase signup profile insert failed:", err);
+    }
   }
 
   const token = createSession(newUser);
@@ -262,17 +302,29 @@ app.get("/api/auth/me", (req, res) => {
 // API ROUTES
 // ============================================================================
 
-app.post("/api/topup", (req, res) => {
+app.post("/api/topup", async (req, res) => {
   const { userId, amount = 1000 } = req.body;
   const user = getUserById(userId);
   if (!user) {
     return res.status(404).json({ success: false, error: "User not found" });
   }
-  user.balance = (user.balance || 0) + Number(amount);
+
+  const nextBalance = (user.balance || 0) + Number(amount);
+  user.balance = nextBalance;
+
+  if (supabase) {
+    try {
+      const { error } = await supabase.from("profiles").update({ balance: nextBalance }).eq("id", user.id);
+      if (error) throw error;
+    } catch (err: any) {
+      console.error("Supabase balance update failed:", err);
+    }
+  }
+
   return res.json({ success: true, balance: user.balance });
 });
 
-app.post("/api/chat/send", (req, res) => {
+app.post("/api/chat/send", async (req, res) => {
   const { senderId, recipientId, text } = req.body;
   const sender = getUserById(senderId);
   const recipient = getUserById(recipientId);
@@ -289,20 +341,39 @@ app.post("/api/chat/send", (req, res) => {
   sender.balance = (sender.balance || 0) - price;
   recipient.earnings_balance = Number((Number(recipient.earnings_balance || 0) + price / 1000 * 0.5).toFixed(2));
   localMessages.push({ id: `msg-${Date.now()}`, senderId, senderName: sender.username, recipientId, recipientName: recipient.username, text, createdAt: new Date().toISOString() });
+
+  if (supabase) {
+    try {
+      await supabase.from("profiles").update({ balance: sender.balance }).eq("id", sender.id);
+      await supabase.from("profiles").update({ earnings_balance: recipient.earnings_balance }).eq("id", recipient.id);
+    } catch (err: any) {
+      console.error("Supabase chat balance sync failed:", err);
+    }
+  }
+
   return res.json({ success: true, remainingBalance: sender.balance });
 });
 
-app.post("/api/video/credit-minute", (req, res) => {
+app.post("/api/video/credit-minute", async (req, res) => {
   const { femaleId, rate = 0.1 } = req.body;
   const female = getUserById(femaleId);
   if (!female) {
     return res.status(404).json({ success: false, error: "Female profile not found" });
   }
   female.earnings_balance = Number((Number(female.earnings_balance || 0) + Number(rate)).toFixed(2));
+
+  if (supabase) {
+    try {
+      await supabase.from("profiles").update({ earnings_balance: female.earnings_balance }).eq("id", female.id);
+    } catch (err: any) {
+      console.error("Supabase video credit sync failed:", err);
+    }
+  }
+
   return res.json({ success: true, earningsBalance: female.earnings_balance });
 });
 
-app.post("/api/female/pricing", (req, res) => {
+app.post("/api/female/pricing", async (req, res) => {
   const { femaleId, msgPrice, videoPrice } = req.body;
   const female = getUserById(femaleId);
   if (!female) {
@@ -310,6 +381,18 @@ app.post("/api/female/pricing", (req, res) => {
   }
   female.msg_price_coins = Number(msgPrice || female.msg_price_coins || 10);
   female.video_price_coins = Number(videoPrice || female.video_price_coins || 350);
+
+  if (supabase) {
+    try {
+      await supabase.from("profiles").update({
+        msg_price_coins: female.msg_price_coins,
+        video_price_coins: female.video_price_coins,
+      }).eq("id", female.id);
+    } catch (err: any) {
+      console.error("Supabase pricing update failed:", err);
+    }
+  }
+
   return res.json({ success: true, msgPrice: female.msg_price_coins, videoPrice: female.video_price_coins });
 });
 
@@ -562,6 +645,21 @@ app.post("/api/withdrawals", async (req, res) => {
   }
 
   female.earnings_balance = Number((Number(female.earnings_balance || 0) - parsedAmount).toFixed(2));
+
+  if (supabase) {
+    try {
+      await supabase.from("profiles").update({ earnings_balance: female.earnings_balance }).eq("id", female.id);
+      await supabase.from("withdrawal_requests").insert({
+        female_id: female.id,
+        amount: parsedAmount,
+        bank_name: bankName,
+        iban,
+        status: "pending",
+      });
+    } catch (err: any) {
+      console.error("Supabase withdrawal insert failed:", err);
+    }
+  }
 
   const newWithdrawal = {
     id: `w-req-${Date.now()}`,

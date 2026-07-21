@@ -13,6 +13,10 @@ type User = {
   is_admin?: boolean;
 };
 
+const AD_APP_ID = 'ca-app-pub-8274833606013878~6815476313';
+const AD_UNIT_ID = 'ca-app-pub-8274833606013878/2549642251';
+const AD_CLIENT_ID = 'ca-pub-8274833606013878';
+
 type Profile = {
   id: string;
   username: string;
@@ -66,6 +70,9 @@ export default function App() {
   const [messageDraft, setMessageDraft] = useState('Hi, I would love to chat with you!');
   const [callTimer, setCallTimer] = useState(0);
   const [isCallActive, setIsCallActive] = useState(false);
+  const [adModalOpen, setAdModalOpen] = useState(false);
+  const [adStatus, setAdStatus] = useState<'idle' | 'loading' | 'watching' | 'complete' | 'error'>('idle');
+  const [adCountdown, setAdCountdown] = useState(0);
 
   const refreshData = async () => {
     try {
@@ -114,6 +121,22 @@ export default function App() {
 
     return () => window.clearInterval(interval);
   }, [isCallActive, user]);
+
+  useEffect(() => {
+    if (typeof document === 'undefined') {
+      return;
+    }
+
+    if (document.getElementById('admob-script')) {
+      return;
+    }
+
+    const script = document.createElement('script');
+    script.id = 'admob-script';
+    script.async = true;
+    script.src = `https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=${AD_CLIENT_ID}`;
+    document.head.appendChild(script);
+  }, []);
 
   useEffect(() => {
     if (!isCallActive || !user || user.gender !== 'female') {
@@ -176,17 +199,52 @@ export default function App() {
     }
   };
 
-  const handleRewardAd = async () => {
-    try {
-      const result = await request('/api/topup', {
-        method: 'POST',
-        body: JSON.stringify({ userId: user?.id, amount: 10 }),
-      });
-      setUser((current) => current ? { ...current, balance: result.balance } : current);
-      setStatus('10 free coins added from the reward ad.');
-    } catch (error: any) {
-      setStatus(error.message);
+  const handleRewardAd = () => {
+    if (!user) {
+      setStatus('Please sign in first.');
+      return;
     }
+
+    setAdModalOpen(true);
+    setAdStatus('loading');
+    setAdCountdown(6);
+
+    const adWindow = window as Window & { adsbygoogle?: Array<Record<string, unknown>> };
+    if (adWindow.adsbygoogle) {
+      try {
+        adWindow.adsbygoogle.push({});
+      } catch {
+        // Ignore AdMob bootstrap issues and fall back to the built-in countdown.
+      }
+    }
+
+    window.setTimeout(() => {
+      setAdStatus('watching');
+    }, 350);
+
+    const timer = window.setInterval(() => {
+      setAdCountdown((value) => {
+        if (value <= 1) {
+          window.clearInterval(timer);
+          setAdStatus('complete');
+          setAdModalOpen(false);
+          void (async () => {
+            try {
+              const result = await request('/api/topup', {
+                method: 'POST',
+                body: JSON.stringify({ userId: user.id, amount: 10 }),
+              });
+              setUser((current) => current ? { ...current, balance: result.balance } : current);
+              setStatus('10 free coins added after the ad finished.');
+            } catch (error: any) {
+              setStatus(error.message);
+            }
+          })();
+          return 0;
+        }
+        return value - 1;
+      });
+    }, 1000);
   };
 
   const handleSendMessage = async () => {
@@ -326,6 +384,36 @@ export default function App() {
             </div>
             <button className="secondary-button" onClick={handleSignOut} type="button">Sign out</button>
           </header>
+
+          {adModalOpen && (
+            <div className="modal-backdrop" onClick={() => setAdModalOpen(false)}>
+              <div className="card ad-card" onClick={(event) => event.stopPropagation()}>
+                <p className="eyebrow">Sponsored ad</p>
+                <h3>Watch the ad to claim 10 coins</h3>
+                <p className="muted">The reward is only granted after the ad-view step finishes.</p>
+                <div className="ad-frame">
+                  <div className="ad-placeholder">
+                    <strong>AdMob unit ready</strong>
+                    <span>App ID: {AD_APP_ID}</span>
+                    <span>Unit ID: {AD_UNIT_ID}</span>
+                  </div>
+                  <ins
+                    className="adsbygoogle"
+                    style={{ display: 'block', width: '100%', minHeight: '180px' }}
+                    data-ad-client={AD_CLIENT_ID}
+                    data-ad-slot={AD_UNIT_ID}
+                    data-ad-format="auto"
+                    data-full-width-responsive="true"
+                  />
+                </div>
+                <div className="ad-progress">Watch time: {adCountdown}s</div>
+                <p className="muted">
+                  {adStatus === 'loading' ? 'Loading your sponsored ad...' : adStatus === 'watching' ? 'The ad is playing now.' : 'Rewarding your account...'}
+                </p>
+                <button className="secondary-button" type="button" onClick={() => setAdModalOpen(false)}>Close</button>
+              </div>
+            </div>
+          )}
 
           {isFemale ? (
             <div className="grid">
