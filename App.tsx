@@ -48,10 +48,13 @@ async function request(path: string, options: RequestInit = {}) {
   headers.set('Content-Type', 'application/json');
   if (token) headers.set('Authorization', `Bearer ${token}`);
 
-  const response = await fetch(path, { ...options, headers });
+  const apiBase = import.meta.env.VITE_API_BASE_URL || (import.meta.env.DEV ? 'http://127.0.0.1:3000' : window.location.origin);
+  const targetUrl = new URL(path, apiBase).toString();
+
+  const response = await fetch(targetUrl, { ...options, headers });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(data.error || 'Request failed');
+    throw new Error(data.error || data.message || `Request failed (${response.status})`);
   }
   return data;
 }
